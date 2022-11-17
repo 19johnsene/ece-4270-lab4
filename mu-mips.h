@@ -52,6 +52,10 @@ typedef struct CPU_Pipeline_Reg_Struct{
 	uint32_t imm;
 	uint32_t ALUOutput;
 	uint32_t LMD;
+	uint32_t RegRS;
+	uint32_t RegRT;
+	uint32_t RegRD;
+	int RegWrite;
 	
 } CPU_Pipeline_Reg;
 
@@ -64,6 +68,9 @@ int RUN_FLAG;	/* run flag*/
 uint32_t INSTRUCTION_COUNT;
 uint32_t CYCLE_COUNT;
 uint32_t PROGRAM_SIZE; /*in words*/
+int ENABLE_FORWARDING;
+uint8_t ForwardA;
+uint8_t ForwardB;
 
 
 /***************************************************************/
@@ -75,8 +82,6 @@ CPU_Pipeline_Reg EX_MEM;
 CPU_Pipeline_Reg MEM_WB;
 
 char prog_file[32];
-
-int ENABLE_FORWARDING = 0;
 
 /***************************************************************/
 /* Function Declerations.                                                                                                */
@@ -111,6 +116,7 @@ void decode_all_operands(const uint32_t instruction,
 void ID_decode_operands(const uint32_t instruction,
 				uint32_t* rs, // A
 				uint32_t* rt, // B
+				uint32_t* rd,
 				uint32_t* immediate);
 void EX_decode_operands(const uint32_t instruction,
 				uint32_t* opcode, 
