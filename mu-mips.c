@@ -21,7 +21,7 @@ void help() {
 	printf("high <val>\t-- set the HI register to <val>\n");
 	printf("low <val>\t-- set the LO register to <val>\n");
 	printf("print\t-- print the program loaded into memory\n");
-	printf("forwarding\n-- determine if forwarding is to be used\n");
+	printf("forwarding\t-- determine if forwarding is to be used\n");
 	printf("show\t-- print the current content of the pipeline registers\n");
 	printf("?\t-- display help menu\n");
 	printf("quit\t-- exit the simulator\n\n");
@@ -234,7 +234,7 @@ void handle_command() {
 			break;
 		case 'F':
 		case 'f':
-			printf("Would you like to turn on forwarding? (1 for yes, 0 for no)\n");
+			printf("Would you like to turn on forwarding? (1 for ON, 0 for OFF)\n");
 			if (scanf("%d", &ENABLE_FORWARDING) != 1) {
 				break;
 			}
@@ -336,11 +336,15 @@ void WB()
 	uint32_t opcode;
 	uint32_t funct;	
 
+	// Hazard Detection Here
+
 	WB_decode_operands(MEM_WB.IR, &rt, &rd, &opcode, &funct);
 
 	WB_populate_destination(rt, rd, opcode, funct);
 	
 	INSTRUCTION_COUNT++;
+
+	return;
 }
 
 /************************************************************/
@@ -351,15 +355,37 @@ void MEM()
 	uint32_t opcode;
 	uint32_t addr;
 	
-	// Get the current instruction
+	// Manage pipeline registers
 	MEM_WB.IR = EX_MEM.IR;
 	MEM_WB.ALUOutput = EX_MEM.ALUOutput;
 	MEM_WB.B = EX_MEM.B;
+	MEM_WB.RegRS = EX_MEM.RegRS;
+	MEM_WB.RegRT = EX_MEM.RegRT;
+	MEM_WB.RegRD = EX_MEM.RegRD;
+	MEM_WB.RegWrite = EX_MEM.RegWrite;
 
 	MEM_decode_operands(ID_EX.IR, &opcode, &addr);
 
 	// Perform the current memory operation
 	MEM_access(opcode, addr);
+
+	if (ENABLE_FORWARDING) {
+		if ((MEM_WB.RegWrite == 1) && (MEM_WB.RegRD != 0) && 
+					!(EX_MEM.RegWrite && (EX_MEM.RegRD != 0) && (EX_MEM.RegRD == ID_EX.RegRS))
+					&& (MEM_WB.RegRD = ID_EX.RegRS)) {
+			ForwardA = 01;
+			ID_EX.A = MEM_WB.LMD;
+		}
+
+		if ((MEM_WB.RegWrite == 1) && (MEM_WB.RegRD != 0) && 
+					!(EX_MEM.RegWrite && (EX_MEM.RegRD != 0) && (EX_MEM.RegRD == ID_EX.RegRT))
+					&& (MEM_WB.RegRD = ID_EX.RegRT)) {
+			ForwardB = 01;
+			ID_EX.B = MEM_WB.LMD;
+		}
+	}
+
+	return;
 }
 
 /************************************************************/
@@ -372,16 +398,32 @@ void EX()
 	uint32_t funct;
 	uint32_t addr;
 	
-	// Get the current instruction & operands
+	// Manage pipeline registers
 	EX_MEM.IR = ID_EX.IR;
 	EX_MEM.A = ID_EX.A;
 	EX_MEM.B = ID_EX.B;
 	EX_MEM.imm = ID_EX.imm;
+	EX_MEM.RegRS = ID_EX.RegRS;
+	EX_MEM.RegRT = ID_EX.RegRT;
+	EX_MEM.RegRD = ID_EX.RegRD;
+	EX_MEM.RegWrite = ID_EX.RegWrite;
 
 	EX_decode_operands(ID_EX.IR, &opcode, &shamt, &funct, &addr);
 
 	// Perform the current operation and store the values
 	EX_perform_operation(EX_MEM.A, EX_MEM.B, EX_MEM.imm, opcode, shamt, funct, addr);
+
+	if (ENABLE_FORWARDING) {
+		if ((EX_MEM.RegWrite == 1) && (EX_MEM.RegRD != 0) && (EX_MEM.RegRD == ID_EX.RegRS)) {
+			ForwardA = 10;
+			ID_EX.A = EX_MEM.A;
+		}
+
+		if ((EX_MEM.RegWrite == 1) && (EX_MEM.RegRD != 0) && (EX_MEM.RegRD == ID_EX.RegRT)) {
+			ForwardB = 10;
+			ID_EX.B = EX_MEM.B;
+		}
+	}
 
 	return;
 }
@@ -393,14 +435,16 @@ void ID()
 {
 	uint32_t rs;
 	uint32_t rt;
+	uint32_t rd;
 	uint32_t immediate;
 	
 	// Get the current instruction
 	ID_EX.IR = IF_ID.IR;
 
 	// Decode the registers in the instruction
-	ID_decode_operands(ID_EX.IR, &rs, &rt, &immediate);
+	ID_decode_operands(ID_EX.IR, &rs, &rt, &rd, &immediate);
 
+	// Manage pipeline registers
 	// ID/EX.A <= REGS[ IF/ID.IR[rs] ]
 	ID_EX.A = CURRENT_STATE.REGS[rs];
 
@@ -409,6 +453,12 @@ void ID()
 
 	// ID/EX.imm <= sign-extend( IF/ID.IR[imm. Field] )
 	ID_EX.imm = immediate;
+
+	// Pass register numbers along pipeline
+	ID_EX.RegRS = rs;
+	ID_EX.RegRT = rt;
+	ID_EX.RegRD = rd;
+	ID_EX.RegWrite = 0;
 
 	return;
 }
@@ -483,6 +533,7 @@ void decode_all_operands(const uint32_t instruction,
 void ID_decode_operands(uint32_t instruction,
 				uint32_t* rs, 
 				uint32_t* rt, 
+				uint32_t* rd, 
 				uint32_t* immediate)
 		{
 	uint32_t temp;
@@ -495,6 +546,11 @@ void ID_decode_operands(uint32_t instruction,
 	temp <<= 11;
 	temp >>= 27;
 	*rt = temp;
+
+	temp = instruction;
+	temp <<= 16;
+	temp >>= 27;
+	*rd = temp;
 
 	temp = instruction;
 	temp <<= 16;
@@ -745,34 +801,42 @@ void EX_perform_operation(uint32_t A,
 			switch (funct) {
 				case (0x20): // add
 					EX_MEM.ALUOutput = A + B;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x21): // addu
 					EX_MEM.ALUOutput = A + B;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x22): // sub
 					EX_MEM.ALUOutput = A - B;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x23): // subu
 					EX_MEM.ALUOutput = A - B;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x24): // and
 					EX_MEM.ALUOutput = (A && B);
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x25): // or
 					EX_MEM.ALUOutput = (A || B);
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x26): // xor	
 					EX_MEM.ALUOutput = (A ^ B);
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x27): // nor	
 					EX_MEM.ALUOutput = ~(A | B);
+					EX_MEM.RegWrite = 1;
 					break;
 
 				case (0x18): // mult
@@ -790,18 +854,22 @@ void EX_perform_operation(uint32_t A,
 
 				case (0x2A): // slt
 					EX_MEM.ALUOutput = (A < B) ? 1 : 0;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x00): // sll
 					EX_MEM.ALUOutput = B << shamt;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x02): // srl
 					EX_MEM.ALUOutput = B >> shamt;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x3):  // sra
 					EX_MEM.ALUOutput = B >> shamt;
+					EX_MEM.RegWrite = 1;
 				break;
 
 				case (0x9):  // jalr	
@@ -848,22 +916,27 @@ void EX_perform_operation(uint32_t A,
 		// I-format
 		case (0x8):  // addi
 			EX_MEM.ALUOutput = A + imm;
+			EX_MEM.RegWrite = 1;
 		break;
 
 		case (0x9):  // addiu
 			EX_MEM.ALUOutput = A + imm;
+			EX_MEM.RegWrite = 1;
 		break;
 
 		case (0xD):  // ori
 			EX_MEM.ALUOutput = (A || imm);
+			EX_MEM.RegWrite = 1;
 		break;
 
 		case (0xE):  // xori
 			EX_MEM.ALUOutput = (A ^ imm);
+			EX_MEM.RegWrite = 1;
 		break;
 
 		case (0xA):  // slti
 			EX_MEM.ALUOutput = (A < imm) ? 1 : 0;
+			EX_MEM.RegWrite = 1;
 		break;
 
 		case (0x23): // lw
@@ -962,6 +1035,7 @@ void MEM_access(const uint32_t opcode, uint32_t address) {
 		case (0x32): // lb
 		case (0x36): // lh		
 			MEM_WB.LMD = mem_read_32(MEM_WB.ALUOutput);
+			MEM_WB.RegWrite = 1;
 		break;
 
 		case (0xF):  // lui
@@ -1564,18 +1638,21 @@ void show_pipeline(){
 	printf("ID/EX.IR\t%x\n", ID_EX.IR);
 	printf("ID/EX.A\t%x\n", ID_EX.A);
 	printf("ID/EX.B\t%x\n", ID_EX.B);
-	printf("ID/EX.imm\t%x\n\n", ID_EX.imm);
+	printf("ID/EX.imm\t%x\n", ID_EX.imm);
+	printf("ID_EX.RegWrite\t%d\n\n", ID_EX.RegWrite);
 
 	// EX_MEM
 	printf("EX/MEM.IR\t%x\n", EX_MEM.IR);
 	printf("EX/MEM.A\t%x\n", EX_MEM.A);
 	printf("EX/MEM.B\t%x\n", EX_MEM.B);
-	printf("EX/MEM.ALUOutput\t%x\n\n", EX_MEM.ALUOutput);
+	printf("EX/MEM.ALUOutput\t%x\n", EX_MEM.ALUOutput);
+	printf("EX_MEM.RegWrite\t%d\n\n", EX_MEM.RegWrite);
 
 	// MEM_WB
 	printf("MEM_WB.IR\t%x\n", MEM_WB.IR);
 	printf("MEM_WB.ALUOutput\t%x\n", MEM_WB.ALUOutput);
-	printf("MEM_WB.LMD\t%x\n\n", MEM_WB.LMD);
+	printf("MEM_WB.LMD\t%x\n", MEM_WB.LMD);
+	printf("MEM_WB.RegWrite\t%d\n\n", MEM_WB.RegWrite);
 
 	return;
 }
