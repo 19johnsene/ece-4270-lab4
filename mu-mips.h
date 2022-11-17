@@ -62,7 +62,6 @@ typedef struct CPU_Pipeline_Reg_Struct{
 /***************************************************************/
 /* CPU State info.                                                                                                               */
 /***************************************************************/
-
 CPU_State CURRENT_STATE, NEXT_STATE;
 int RUN_FLAG;	/* run flag*/
 uint32_t INSTRUCTION_COUNT;
